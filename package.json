@@ -1,0 +1,26 @@
+{
+  "name": "nanoka-atlas-backend",
+  "version": "1.0.0",
+  "private": true,
+  "packageManager": "yarn@4.6.0",
+  "type": "module",
+  "description": "Scrape nanoka.cc game database JSON into a local atlas backend with a downloaded image gallery.",
+  "scripts": {
+    "scrape": "node src/scrape.mjs",
+    "scrape:full": "node src/scrape.mjs --mode full",
+    "scrape:incremental": "node src/scrape.mjs --mode incremental",
+    "scrape:check": "node src/scrape.mjs --mode incremental --check-remote",
+    "scrape:check-sample": "node src/scrape.mjs --mode incremental --check-remote --missing-remote-key-only --remote-check-limit 100",
+    "scrape:verify": "node src/scrape.mjs --mode incremental --verify-images",
+    "scrape:no-images": "node src/scrape.mjs --no-images",
+    "scrape:sample": "node src/scrape.mjs --sample --no-images",
+    "audit:missing-images": "node src/audit-missing-images.mjs",
+    "audit:page-images": "node src/audit-page-image-links.mjs",
+    "report:missing-images": "node src/report-missing-images.mjs",
+    "report:missing-images:filtered": "node src/report-filtered-missing-images.mjs",
+    "versions": "node src/scrape.mjs --list-versions"
+  },
+  "dependencies": {
+    "cheerio": "^1.0.0"
+  }
+}

@@ -1,0 +1,13 @@
+node_modules/
+package-lock.json
+data/
+gallery/
+*.log
+.yarn/*
+!.yarn/releases/
+!.yarn/plugins/
+!.yarn/sdks/
+!.yarn/versions/
+work/
+.DS_Store
+Thumbs.db
