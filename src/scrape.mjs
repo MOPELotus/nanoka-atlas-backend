@@ -110,6 +110,34 @@ const dataEndpoints = {
   nte: ["{locale}/achievement", "character", "weapon", "{locale}/item", "{locale}/console"]
 };
 
+const zzzIconMapAssetNames = {
+  Icon_Normal: ["Icon_Normal"],
+  Icon_Evade: ["Icon_Evade"],
+  Icon_Evaded: ["Icon_Evade"],
+  Icon_Special: ["IconRoleSkillKeySpecial"],
+  Icon_SpecialReady: ["IconRoleSkillKeySpecialV2"],
+  Icon_SpecialReady_Rp: ["IconRoleSkillKeySpecialV3_02"],
+  Icon_UltimateReady: ["Icon_UltimateReady"],
+  Icon_Switch: ["Icon_Switch", "CardSwitch01"],
+  Icon_QTE: ["Icon_QTE", "CardSwitch01"],
+  Icon_Chain: ["Icon_UltimateReady", "TransformChain01"],
+  Icon_Assist: ["Icon_QTE", "CardSwitch01"],
+  Icon_CoreSkill: ["Icon_CoreSkill"],
+  Icon_JoyStick: ["Icon_JoyStick"],
+  Icon_AvatarClass_Attack: ["IconAttack"],
+  Icon_AvatarClass_Anomaly: ["IconAnomaly"],
+  Icon_AvatarClass_Rupture: ["IconRupture"],
+  Icon_AvatarClass_Stun: ["IconStun"],
+  Icon_GeneralBuff_PhysDmg: ["IconPhysDmg"],
+  Icon_GeneralBuff_Thunder: ["IconThunder"],
+  Icon_GeneralBuff_Fire: ["IconFire"],
+  Icon_GeneralBuff_Ice: ["IconIce"],
+  Icon_GeneralBuff_DungeonBuffEther: ["IconDungeonBuffEther"],
+  Icon_GeneralBuff_AuricInk: ["IconAuricInk"],
+  Icon_GeneralBuff_HonedEdge: ["IconHonedEdge"],
+  Icon_GeneralBuff_Frost: ["IconFrost"]
+};
+
 const detailEndpointPatterns = {
   hsr: {
     character: "{locale}/character/{id}.json",
@@ -1126,7 +1154,20 @@ function collectImageRefs({ game, pageKey, sourceUrl, content }) {
   for (const [recordId, record] of entries) {
     const recordRefs = [];
     walk(record, [], (key, value, fieldPath) => {
-      if (typeof value !== "string" || !looksLikeImageField(key, value)) {
+      if (typeof value !== "string") {
+        return;
+      }
+
+      recordRefs.push(...iconMapImageRefs({
+        game,
+        pageKey,
+        sourceUrl,
+        recordId,
+        fieldPath,
+        value
+      }));
+
+      if (!looksLikeImageField(key, value)) {
         return;
       }
       const ref = makeImageRef({
@@ -1147,6 +1188,23 @@ function collectImageRefs({ game, pageKey, sourceUrl, content }) {
   }
 
   return refs;
+}
+
+function iconMapImageRefs({ game, pageKey, sourceUrl, recordId, fieldPath, value }) {
+  if (game.id !== "zzz") {
+    return [];
+  }
+
+  return unique([...String(value).matchAll(/<IconMap:([^>]+)>/g)].map((match) => match[1]).filter(Boolean))
+    .map((token) => makeImageRef({
+      game,
+      pageKey,
+      sourceUrl,
+      recordId,
+      fieldPath: `${fieldPath}.IconMap.${token}`,
+      originalValue: `<IconMap:${token}>`,
+      kind: "icon_map"
+    }));
 }
 
 function looksLikeImageField(key, value) {
@@ -1339,6 +1397,14 @@ function buildImageCandidates(gameId, pageKey, rawValue, recordId, fieldPath) {
       candidates.push(url);
     }
   };
+
+  const iconMapToken = value.match(/^<IconMap:([^>]+)>$/)?.[1] ?? value.match(/^IconMap:([^>]+)$/)?.[1];
+  if (gameId === "zzz" && iconMapToken) {
+    for (const assetName of zzzIconMapAssetNames[iconMapToken] ?? [iconMapToken]) {
+      add(`${assetBase}/${stripImageExt(assetName)}.webp`);
+    }
+    return candidates;
+  }
 
   if (gameId === "hsr") {
     if (value.includes("/")) {
