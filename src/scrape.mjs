@@ -1,6 +1,6 @@
 import { load } from "cheerio";
 import { createHash } from "node:crypto";
-import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -233,6 +233,7 @@ function parseArgs(argv) {
     missingRemoteKeyOnly: false,
     mode: "incremental",
     noImages: false,
+    pages: new Map(),
     remoteCheckLimit: null,
     samplePerPage: null,
     verifyImages: false,
@@ -292,6 +293,8 @@ function parseArgs(argv) {
           parsed.locales.add(locale);
         }
       }
+    } else if (arg === "--page" || arg.startsWith("--page=") || arg === "--pages" || arg.startsWith("--pages=")) {
+      parsePageArg(readValue(), parsed.pages);
     } else if (arg === "--version" || arg.startsWith("--version=")) {
       parseVersionArg(readValue(), parsed.versions);
     } else if (arg === "--versions" || arg.startsWith("--versions=")) {
@@ -330,6 +333,40 @@ function normalizeLocale(value) {
 
 function selectedLocaleIds() {
   return options.locales.size ? [...options.locales] : locales.map((locale) => locale.id);
+}
+
+function parsePageArg(value, pages) {
+  for (const segment of String(value ?? "").split(";")) {
+    const match = segment.trim().match(/^([a-z0-9_-]+)\s*[=:]\s*(.+)$/i);
+    if (!match) {
+      throw new Error("Invalid page argument: " + segment + ". Use gi=character,weapon.");
+    }
+    const gameId = match[1].trim();
+    if (!games.some((game) => game.id === gameId)) {
+      throw new Error("Unsupported page game: " + gameId + ".");
+    }
+    const selected = pages.get(gameId) ?? new Set();
+    for (const page of match[2].split(",")) {
+      const pageKey = page.trim();
+      if (pageKey) selected.add(pageKey);
+    }
+    if (!selected.size) {
+      throw new Error("No pages selected for " + gameId + ".");
+    }
+    pages.set(gameId, selected);
+  }
+}
+
+function selectedGames() {
+  return games.filter((game) =>
+    (options.games.size === 0 || options.games.has(game.id))
+    && (options.pages.size === 0 || options.pages.has(game.id))
+  );
+}
+
+function isSelectedPage(gameId, pageKey) {
+  const selected = options.pages.get(gameId);
+  return !selected || selected.has(pageKey);
 }
 
 function localeInfo(localeId) {
@@ -377,7 +414,7 @@ function resolveRequestedVersion(gameId, manifest) {
 
 function printVersions(manifest) {
   const output = {};
-  for (const game of games) {
+  for (const game of selectedGames()) {
     output[game.id] = {
       name: game.name,
       latest: manifest[game.id]?.latest ?? null,
@@ -389,9 +426,15 @@ function printVersions(manifest) {
 }
 
 async function prepareStructuredDataDir() {
-  await rm(itemsDir, { recursive: true, force: true });
-  await rm(path.join(dataDir, "games"), { recursive: true, force: true });
-  await rm(path.join(dataDir, "atlas.json"), { force: true });
+  if (options.mode === "full") {
+    await rm(itemsDir, { recursive: true, force: true });
+    await rm(path.join(dataDir, "games"), { recursive: true, force: true });
+    await rm(path.join(dataDir, "atlas.json"), { force: true });
+    await rm(path.join(dataDir, "map.json"), { force: true });
+    await rm(path.join(dataDir, "gallery-index.json"), { force: true });
+    await rm(imageCachePath, { force: true });
+    await rm(galleryDir, { recursive: true, force: true });
+  }
   await mkdir(itemsDir, { recursive: true });
 }
 
@@ -408,14 +451,21 @@ async function main() {
     return;
   }
 
+  const previousMap = options.mode === "incremental"
+    ? await readJsonIfExists(path.join(dataDir, "map.json"), {})
+    : {};
+  const previousGallery = options.mode === "incremental"
+    ? await readJsonIfExists(path.join(dataDir, "gallery-index.json"), {})
+    : {};
+
   await mkdir(dataDir, { recursive: true });
-  await mkdir(galleryDir, { recursive: true });
   await prepareStructuredDataDir();
+  await mkdir(galleryDir, { recursive: true });
   await ensurePlaceholderImage();
   persistentImageCache = await readJsonIfExists(imageCachePath, {});
 
   const selectedLocales = selectedLocaleIds();
-  const selectedGames = games.filter((game) => options.games.size === 0 || options.games.has(game.id));
+  const selected = selectedGames();
   const fetchedAt = new Date().toISOString();
   const map = {
     meta: {
@@ -429,24 +479,29 @@ async function main() {
       remoteCheckLimit: options.remoteCheckLimit,
       samplePerPage: options.samplePerPage,
       locales: selectedLocales,
-      requestedVersions: Object.fromEntries(options.versions)
+      requestedVersions: Object.fromEntries(options.versions),
+      selectedPages: Object.fromEntries([...options.pages].map(([gameId, pages]) => [gameId, [...pages]]))
     },
-    games: {}
+    games: options.mode === "incremental" && previousMap?.games ? previousMap.games : {}
   };
 
-  const gallery = [];
+  const updatedGallery = [];
+  const touchedPages = new Set();
 
-  for (const game of selectedGames) {
+  for (const game of selected) {
     console.log(`\n== ${game.id} ${game.name} ==`);
     const requestedVersion = resolveRequestedVersion(game.id, manifest);
     const gameAtlas = await scrapeGame(game, fetchedAt, manifest, requestedVersion);
-    map.games[game.id] = await exportGameRecords(gameAtlas);
+    const exported = await exportGameRecords(gameAtlas);
+    map.games[game.id] = mergeGameRecords(map.games[game.id], exported);
     for (const page of Object.values(gameAtlas.pages)) {
-      gallery.push(...page.images);
+      touchedPages.add(game.id + "|" + page.pageKey);
+      updatedGallery.push(...page.images);
     }
     console.log(`saved ${Object.keys(gameAtlas.pages).length} pages`);
   }
 
+  const gallery = mergeGalleryEntries(previousGallery?.images, updatedGallery, touchedPages);
   await writeJson(path.join(dataDir, "map.json"), map);
   await writeJson(path.join(dataDir, "gallery-index.json"), {
     meta: {
@@ -537,6 +592,9 @@ async function loadDataSources(game, prefetched, requestedVersion) {
   for (const item of prefetched) {
     const sourceUrl = requestedVersion ? setDataVersion(game.id, item.sourceUrl, requestedVersion) : item.sourceUrl;
     const descriptor = describeDataSource(game.id, sourceUrl);
+    if (!isSelectedPage(game.id, descriptor.pageKey)) {
+      continue;
+    }
 
     if (descriptor.locale) {
       for (const locale of selectedLocales) {
@@ -681,6 +739,9 @@ function addKnownDataSources(gameId, version, selectedLocales, sourceMap) {
     if (endpoint.includes("{locale}")) {
       for (const locale of selectedLocales) {
         const sourceUrl = `${staticBase}/${gameId}/${version}/${endpoint.replace("{locale}", locale)}.json`;
+        if (!isSelectedPage(gameId, describeDataSource(gameId, sourceUrl).pageKey)) {
+          continue;
+        }
         if (!sourceMap.has(sourceUrl)) {
           sourceMap.set(sourceUrl, {
             sourceUrl,
@@ -696,6 +757,9 @@ function addKnownDataSources(gameId, version, selectedLocales, sourceMap) {
     }
 
     const sourceUrl = `${staticBase}/${gameId}/${version}/${endpoint}.json`;
+    if (!isSelectedPage(gameId, describeDataSource(gameId, sourceUrl).pageKey)) {
+      continue;
+    }
     if (!sourceMap.has(sourceUrl)) {
       sourceMap.set(sourceUrl, {
         sourceUrl,
@@ -725,6 +789,7 @@ async function exportGameRecords(gameAtlas) {
     locales: {}
   };
   const usedPaths = new Set();
+  const expectedFilesByPageDir = new Map();
 
   for (const page of Object.values(gameAtlas.pages)) {
     const pageKey = page.pageKey;
@@ -789,7 +854,12 @@ async function exportGameRecords(gameAtlas) {
           }
         };
 
-        await writeJson(path.join(dataDir, itemRelativePath), recordJson);
+        const itemFile = path.join(dataDir, itemRelativePath);
+        await writeJsonIfChanged(itemFile, recordJson);
+        const pageDir = path.join(itemsDir, locale.folder, gameFolder, pageFolder);
+        const expected = expectedFilesByPageDir.get(pageDir) ?? new Set();
+        expected.add(path.resolve(itemFile));
+        expectedFilesByPageDir.set(pageDir, expected);
         pageMap.records[recordId] = {
           id: String(recordId),
           name: displayName,
@@ -805,7 +875,78 @@ async function exportGameRecords(gameAtlas) {
     }
   }
 
+  for (const [pageDir, expectedFiles] of expectedFilesByPageDir) {
+    await pruneStaleItemFiles(pageDir, expectedFiles);
+  }
+
   return gameMap;
+}
+
+function mergeGameRecords(previous, next) {
+  if (!previous?.locales) {
+    return next;
+  }
+  const locales = { ...previous.locales };
+  for (const [localeId, locale] of Object.entries(next.locales || {})) {
+    const current = locales[localeId] ?? {};
+    locales[localeId] = {
+      ...current,
+      ...locale,
+      pages: {
+        ...(current.pages || {}),
+        ...(locale.pages || {})
+      }
+    };
+  }
+  return {
+    ...previous,
+    ...next,
+    locales
+  };
+}
+
+function mergeGalleryEntries(previousImages, updatedImages, touchedPages) {
+  const merged = new Map();
+  for (const image of Array.isArray(previousImages) ? previousImages : []) {
+    const pageKey = String(image?.gameId || "") + "|" + String(image?.pageId || "");
+    if (touchedPages.has(pageKey)) {
+      continue;
+    }
+    merged.set(galleryEntryKey(image), image);
+  }
+  for (const image of updatedImages) {
+    merged.set(galleryEntryKey(image), image);
+  }
+  return [...merged.values()];
+}
+
+function galleryEntryKey(image = {}) {
+  return [
+    image.gameId,
+    image.pageId,
+    image.recordId,
+    image.fieldPath,
+    image.originalValue
+  ].map((value) => String(value ?? "")).join("|");
+}
+
+async function pruneStaleItemFiles(directory, expectedFiles) {
+  let entries;
+  try {
+    entries = await readdir(directory, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    const target = path.join(directory, entry.name);
+    if (entry.isDirectory()) {
+      await pruneStaleItemFiles(target, expectedFiles);
+      continue;
+    }
+    if (entry.isFile() && entry.name.endsWith(".json") && !expectedFiles.has(path.resolve(target))) {
+      await rm(target, { force: true });
+    }
+  }
 }
 
 function ensureLocaleMap(gameMap, locale) {
@@ -2127,6 +2268,21 @@ async function fetchJsonIfExists(url) {
 async function writeJson(filePath, value) {
   await mkdir(path.dirname(filePath), { recursive: true });
   await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+async function writeJsonIfChanged(filePath, value) {
+  const next = `${JSON.stringify(value, null, 2)}\n`;
+  try {
+    const current = await readFile(filePath, "utf8");
+    if (current === next) {
+      return false;
+    }
+  } catch {
+    // Missing files are written below.
+  }
+  await mkdir(path.dirname(filePath), { recursive: true });
+  await writeFile(filePath, next, "utf8");
+  return true;
 }
 
 async function runPool(items, concurrency, worker) {
