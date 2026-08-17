@@ -394,14 +394,30 @@ function parseVersionArg(value, versions) {
 
 function resolveRequestedVersion(gameId, manifest) {
   const requested = options.versions.get(gameId) ?? options.versions.get("*") ?? null;
-  if (!requested || requested === "home") {
-    return null;
+  if (requested === "home") {
+    return null; // explicit home: keep following the homepage prefetch version
   }
   if (requested === "latest") {
     return manifest[gameId]?.latest ?? null;
   }
   if (requested === "live") {
     return manifest[gameId]?.live ?? null;
+  }
+  if (!requested) {
+    // No explicit version: default to manifest.latest instead of the homepage
+    // prefetch version, which can lag behind and silently miss new records.
+    // Guard the publish window: if latest is not listed in manifest.available
+    // yet, fall back to the homepage prefetch version (old behavior).
+    const entry = manifest[gameId];
+    const latest = entry?.latest;
+    const available = entry?.available;
+    if (latest && (!Array.isArray(available) || available.length === 0 || available.includes(latest))) {
+      return latest;
+    }
+    if (latest) {
+      console.warn(`  ! ${gameId}: manifest.latest ${latest} not available yet; falling back to homepage prefetch version`);
+    }
+    return null;
   }
 
   const available = manifest[gameId]?.available;
