@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveRequestedVersion as resolveVersion } from "./version-resolution.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
@@ -219,6 +220,11 @@ const imageTimeoutMs = readIntegerEnv("IMAGE_TIMEOUT_MS", 120000, 1);
 const imageRetries = readIntegerEnv("IMAGE_RETRIES", requestRetries, 0);
 const headTimeoutMs = readIntegerEnv("HEAD_TIMEOUT_MS", 60000, 1);
 const headRetries = readIntegerEnv("HEAD_RETRIES", requestRetries, 0);
+// Keep memory and socket pressure predictable on small VPS/desktop hosts.
+// Override per host when needed, but conservative defaults are intentional.
+const imageConcurrency = readIntegerEnv("IMAGE_CONCURRENCY", 4, 1);
+const detailConcurrency = readIntegerEnv("DETAIL_CONCURRENCY", 6, 1);
+const detailMapConcurrency = readIntegerEnv("DETAIL_MAP_CONCURRENCY", 2, 1);
 
 const imageCache = new Map();
 let persistentImageCache = {};
@@ -394,38 +400,11 @@ function parseVersionArg(value, versions) {
 
 function resolveRequestedVersion(gameId, manifest) {
   const requested = options.versions.get(gameId) ?? options.versions.get("*") ?? null;
-  if (requested === "home") {
-    return null; // explicit home: keep following the homepage prefetch version
+  const resolved = resolveVersion(gameId, manifest, requested);
+  if (!requested && resolved === null && manifest[gameId]?.latest) {
+    console.warn(`  ! ${gameId}: manifest.latest ${manifest[gameId].latest} not available yet; falling back to homepage prefetch version`);
   }
-  if (requested === "latest") {
-    return manifest[gameId]?.latest ?? null;
-  }
-  if (requested === "live") {
-    return manifest[gameId]?.live ?? null;
-  }
-  if (!requested) {
-    // No explicit version: default to manifest.latest instead of the homepage
-    // prefetch version, which can lag behind and silently miss new records.
-    // Guard the publish window: if latest is not listed in manifest.available
-    // yet, fall back to the homepage prefetch version (old behavior).
-    const entry = manifest[gameId];
-    const latest = entry?.latest;
-    const available = entry?.available;
-    if (latest && (!Array.isArray(available) || available.length === 0 || available.includes(latest))) {
-      return latest;
-    }
-    if (latest) {
-      console.warn(`  ! ${gameId}: manifest.latest ${latest} not available yet; falling back to homepage prefetch version`);
-    }
-    return null;
-  }
-
-  const available = manifest[gameId]?.available;
-  if (Array.isArray(available) && available.length > 0 && !available.includes(requested)) {
-    console.warn(`  ! ${gameId}: ${requested} is not listed in manifest.available; trying it anyway.`);
-  }
-
-  return requested;
+  return resolved;
 }
 
 function printVersions(manifest) {
@@ -675,7 +654,7 @@ async function attachDetails(game, pages) {
         }
       }
 
-      await runPool(tasks, 16, async ({ locale, recordId }) => {
+      await runPool(tasks, detailConcurrency, async ({ locale, recordId }) => {
         const sourceUrl = buildVersionedEndpoint(game.id, page.version, detailPattern, locale, recordId);
         const detail = await fetchJsonIfExists(sourceUrl);
         if (!detail) {
@@ -698,7 +677,7 @@ async function attachDetails(game, pages) {
 
     const detailMapPattern = detailMapEndpointPatterns[game.id]?.[page.pageKey];
     if (detailMapPattern) {
-      await runPool(page.exportLocales, 4, async (locale) => {
+      await runPool(page.exportLocales, detailMapConcurrency, async (locale) => {
         const sourceUrl = buildVersionedEndpoint(game.id, page.version, detailMapPattern, locale);
         const detailMap = await fetchJsonIfExists(sourceUrl);
         if (!detailMap || typeof detailMap !== "object") {
@@ -1669,7 +1648,7 @@ function buildImageCandidates(gameId, pageKey, rawValue, recordId, fieldPath) {
 async function resolveImages(refs) {
   let resolved = 0;
 
-  await runPool(refs, 12, async (ref) => {
+  await runPool(refs, imageConcurrency, async (ref) => {
     try {
       if (!downloadImages) {
         ref.status = "not_downloaded";

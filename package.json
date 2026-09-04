@@ -18,7 +18,8 @@
     "audit:page-images": "node src/audit-page-image-links.mjs",
     "report:missing-images": "node src/report-missing-images.mjs",
     "report:missing-images:filtered": "node src/report-filtered-missing-images.mjs",
-    "versions": "node src/scrape.mjs --list-versions"
+    "versions": "node src/scrape.mjs --list-versions",
+    "test:version-resolution": "node src/version-resolution.test.mjs"
   },
   "dependencies": {
     "cheerio": "^1.0.0"
